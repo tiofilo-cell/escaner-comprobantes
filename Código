@@ -1,0 +1,87 @@
+import json
+from google import genai
+from google.genai import types
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+import streamlit as st
+
+# Configuración de la interfaz móvil/web
+st.set_page_config(
+    page_title="Extractor de Comprobantes IA", page_icon="🧾", layout="centered"
+)
+
+st.title("🧾 Escáner Inteligente a Google Sheets")
+st.write(
+    "Toma una foto o sube la boleta/factura para registrarla automáticamente."
+)
+
+# Configuración de credenciales usando Streamlit Secrets (más seguro para la nube)
+try:
+  # Carga las credenciales desde los secretos de Streamlit
+  creds_dict = dict(st.secrets["google_credentials"])
+  scope = [
+      "https://spreadsheets.google.com/feeds",
+      "https://www.googleapis.com/auth/drive",
+  ]
+  creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+  client_gs = gspread.authorize(creds)
+  sheet = client_gs.open("Registro de Compras").sheet1
+except Exception as e:
+  st.error(
+      "Error al conectar con Google Sheets. Configura tus credenciales en los"
+      " secrets."
+  )
+  st.stop()
+
+# Componente para tomar foto desde el celular o subir imagen
+foto_capturada = st.camera_input("Toma una foto al comprobante")
+
+if foto_capturada is not None:
+  with st.spinner("Analizando con IA y guardando en Google Sheets..."):
+    try:
+      image_bytes = foto_capturada.getvalue()
+
+      # Inicializar cliente de Gemini
+      client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+
+      prompt = """
+            Analiza esta imagen (boleta, factura o recibo) y extrae en formato JSON estricto:
+            - nombre: Nombre principal del producto o servicio.
+            - cantidad: Cantidad numérica (si no hay, 1).
+            - fecha: Fecha de compra (DD/MM/YYYY).
+            - precio: Precio total o unitario (número float).
+            - proveedor: Empresa o entidad que vende.
+            - telefono: Teléfono de contacto (o "No disponible").
+            - distrito: Distrito fiscal o físico (o "No especificado").
+            """
+
+      response = client.models.generate_content(
+          model="gemini-2.5-flash",
+          contents=[
+              types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
+              prompt,
+          ],
+          config=types.GenerateContentConfig(response_mime_type="application/json"),
+      )
+
+      # Parsear respuesta de la IA
+      data = json.loads(response.text)
+
+      # Guardar en Google Sheets (Columnas: NOMBRE, CANTIDAD, FECHA, PRECIO, PROVEEDOR, TELÉFONO, DISTRITO)
+      fila = [
+          data.get("nombre", ""),
+          data.get("cantidad", 1),
+          data.get("fecha", ""),
+          data.get("precio", 0.0),
+          data.get("proveedor", ""),
+          data.get("telefono", ""),
+          data.get("distrito", ""),
+      ]
+
+      sheet.append_row(fila)
+
+      st.success("¡Datos registrados con éxito en tu Google Sheet! 🎉")
+      st.json(data)
+
+    except Exception as e:
+      st.error(f"Ocurrió un error al procesar la imagen: {e}")
